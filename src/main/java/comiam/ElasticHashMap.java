@@ -167,6 +167,7 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
         Entry<K, V>[] table;
         int capacity;
         int count; // Number of occupied slots.
+        int threshA1;
 
         @SuppressWarnings("unchecked")
         Segment(final int requestedCapacity) {
@@ -175,6 +176,7 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
             if (this.capacity < requestedCapacity) {
                 this.capacity <<= 1;
             }
+            this.threshA1 = getThreshA1();
 
             this.count = 0;
             this.table = (Entry<K, V>[]) new Entry[capacity];
@@ -183,6 +185,11 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
         void resize(final int newCapacity) {
             table = Arrays.copyOf(table, newCapacity);
             capacity = newCapacity;
+            threshA1 = getThreshA1();
+        }
+
+        int getThreshA1() {
+            return (int) Math.ceil(INITIAL_FILL_RATIO * capacity);
         }
 
         /**
@@ -262,8 +269,9 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
         final int probeFn = probeFunction(segIdx, probeCount, h);
 
         // Fast path for power-of-two capacities
-        if ((seg.capacity & (seg.capacity - 1)) == 0) {
-            return probeFn & (seg.capacity - 1);
+        final int i = seg.capacity - 1;
+        if ((seg.capacity & i) == 0) {
+            return probeFn & i;
         }
 
         // Fall back to modulo for non-power-of-two
@@ -305,8 +313,7 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
         // For batch 0, if not in rehash mode and A1 is near full, switch to batch 1.
         if (!rehashMode && currentBatch == 0) {
             final Segment<K, V> seg0 = segments[0];
-            final int threshA1 = (int) Math.ceil(INITIAL_FILL_RATIO * seg0.capacity);
-            if (seg0.count >= threshA1 && segments.length > 1) {
+            if (seg0.count >= seg0.threshA1 && segments.length > 1) {
                 currentBatch = 1;
             }
         }
@@ -390,8 +397,7 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
             entry.probeCount = j;
             seg.insert(idx, entry);
             size++;
-            final int threshA1 = (int) Math.ceil(INITIAL_FILL_RATIO * seg.capacity);
-            if (seg.count >= threshA1 && segments.length > 1) {
+            if (seg.count >= seg.threshA1 && segments.length > 1) {
                 currentBatch = 1;
             }
             return true;
@@ -450,8 +456,7 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
     private void updateBatchIfNeeded() {
         if (currentBatch == 0) {
             final Segment<K, V> seg = segments[0];
-            final int threshA1 = (int) Math.ceil(INITIAL_FILL_RATIO * seg.capacity);
-            if (seg.count >= threshA1 && segments.length > 1) {
+            if (seg.count >= seg.threshA1 && segments.length > 1) {
                 currentBatch = 1;
             }
         } else {
@@ -654,8 +659,8 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
             final Segment<K, V> seg = segments[segIdx];
             final Entry<K, V>[] table = seg.table;
             final int capacity = seg.capacity;
-            final boolean isPowerOfTwo = (capacity & (capacity - 1)) == 0;
             final int mask = capacity - 1;
+            final boolean isPowerOfTwo = (capacity & mask) == 0;
 
             // Only check first 8 probes in each segment (diminishing returns after that)
             for (int probeCount = 1; probeCount <= 8; probeCount++) {
