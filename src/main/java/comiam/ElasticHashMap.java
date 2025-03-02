@@ -177,7 +177,7 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
             }
 
             this.count = 0;
-            this.table = (Entry<K, V>[]) new Entry[this.capacity];
+            this.table = (Entry<K, V>[]) new Entry[capacity];
         }
 
         void resize(final int newCapacity) {
@@ -229,9 +229,10 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
      * @return mixed hash code.
      */
     private int mix(final int h) {
+        // More efficient mixing based on HashMap's implementation
         int hash = h;
-        hash ^= (hash >>> 20) ^ (hash >>> 12);
-        return hash ^ (hash >>> 7) ^ (hash >>> 4);
+        hash ^= (hash >>> 16);
+        return hash;
     }
 
     /**
@@ -542,8 +543,7 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
      * @throws IllegalStateException if rehashing fails.
      */
     private void resize() {
-        final int newCapacity = totalCapacity * 2;
-        resize(newCapacity);
+        resize(totalCapacity * 2);
     }
 
     /**
@@ -604,7 +604,8 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
         final int mask = firstSegCap - 1;
 
         // Direct lookup using first probe (most common case)
-        int idx = mix(hashCode) & 0x7fffffff;
+        final int mixedHashCode = mix(hashCode);
+        int idx = mixedHashCode & 0x7fffffff;
         if (isPowerOfTwo) {
             idx &= mask;
         } else {
@@ -618,7 +619,7 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
 
         // Try a few more probes in first segment with unrolled loop
         for (int probeCount = 2; probeCount <= 4; probeCount++) {
-            idx = (mix(hashCode) + probeCount * probeCount) & 0x7fffffff;
+            idx = (mixedHashCode + probeCount * probeCount) & 0x7fffffff;
             if (isPowerOfTwo) {
                 idx &= mask;
             } else {
@@ -633,18 +634,19 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
         }
 
         // If not found in the hot path, search remaining segments
-        return searchRemainingSegments(key, hashCode);
+        return searchRemainingSegments(key, hashCode, mixedHashCode);
     }
 
     /**
      * Searches for the key in remaining segments.
      * Separate method to keep hot path clean for JIT optimization.
      *
-     * @param key      the key.
-     * @param hashCode the precomputed hash code.
+     * @param key           the key.
+     * @param hashCode      the precomputed hash code.
+     * @param mixedHashCode the mixed hash code.
      * @return associated value or null.
      */
-    private V searchRemainingSegments(Object key, int hashCode) {
+    private V searchRemainingSegments(Object key, final int hashCode, final int mixedHashCode) {
         final int maxSeg = Math.min(segments.length, currentBatch + 2);
 
         // Skip segment 0 since we already checked it
@@ -657,8 +659,7 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
 
             // Only check first 8 probes in each segment (diminishing returns after that)
             for (int probeCount = 1; probeCount <= 8; probeCount++) {
-                final int mixedHash = mix(hashCode);
-                final int probeFn = (mixedHash + segIdx * probeCount * probeCount) & 0x7fffffff;
+                final int probeFn = (mixedHashCode + segIdx * probeCount * probeCount) & 0x7fffffff;
                 final int idx = isPowerOfTwo ? (probeFn & mask) : (probeFn % capacity);
 
                 final Entry<K, V> e = table[idx];
