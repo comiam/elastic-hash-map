@@ -119,7 +119,7 @@ such as invalid parameters and null key insertions.
 
 ## License
 
-This project is provided under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is provided under the Mozilla Public License 2.0. See the [LICENSE](LICENSE) file for details.
 
 ---
 
