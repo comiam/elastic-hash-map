@@ -76,6 +76,9 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
     // Flag used during resize to force rehash insertions into batch 0.
     private boolean rehashMode = false;
 
+    // Pre-calculate logarithm of delta at construction time
+    private final double logDeltaInverse;
+
     /**
      * Constructs an ElasticHashMap with the specified initial capacity and delta.
      *
@@ -90,6 +93,7 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
             throw new IllegalArgumentException("delta must be in (0,1)");
         }
         this.delta = delta;
+        this.logDeltaInverse = Math.log(1.0 / delta) / LOG_OF_2;
         initializeTable(initialCapacity);
     }
 
@@ -116,16 +120,21 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
         final int numSegments = (int) Math.floor(log2Capacity) + 1;
         Segment<K, V>[] segs = (Segment<K, V>[]) new Segment[numSegments];
         int sum = 0;
+
         for (int i = 0; i < numSegments; i++) {
-            // Use bit-shift to quickly compute segment capacity: capacity / 2^(i+1)
-            final int segCap = Math.max(1, capacity >> (i + 1));
+            // Make each segment capacity a power of two for fast modulo
+            final int powerOfTwo = Integer.highestOneBit(capacity >> (i + 1));
+            final int segCap = Math.max(2, powerOfTwo);
             segs[i] = new Segment<>(segCap);
             sum += segCap;
         }
-        // Adjust first segment so that the total capacity equals the provided capacity.
+
+        // Adjust first segment to reach target capacity (make it power of two as well)
         if (sum < capacity) {
-            segs[0].resize(segs[0].capacity + (capacity - sum));
+            int newCap = Integer.highestOneBit(segs[0].capacity + (capacity - sum)) * 2;
+            segs[0].resize(newCap);
         }
+
         return segs;
     }
 
@@ -136,11 +145,13 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
 
         final K key;
         V value;
-        int segmentIndex; // Indicates the batch/segment where the entry is stored.
-        int probeCount;   // Number of probes used to insert the entry.
+        final int hash; // Store hash code to avoid recalculation
+        int segmentIndex;
+        int probeCount;
 
         Entry(final K key, final V value, final int segmentIndex, final int probeCount) {
             this.key = key;
+            this.hash = key.hashCode();
             this.value = value;
             this.segmentIndex = segmentIndex;
             this.probeCount = probeCount;
@@ -158,10 +169,15 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
         int count; // Number of occupied slots.
 
         @SuppressWarnings("unchecked")
-        Segment(final int capacity) {
-            this.capacity = capacity;
+        Segment(final int requestedCapacity) {
+            // Round up to power of two
+            this.capacity = Integer.highestOneBit(requestedCapacity - 1) << 1;
+            if (this.capacity < requestedCapacity) {
+                this.capacity <<= 1;
+            }
+
             this.count = 0;
-            this.table = (Entry<K, V>[]) new Entry[capacity];
+            this.table = (Entry<K, V>[]) new Entry[this.capacity];
         }
 
         void resize(final int newCapacity) {
@@ -213,7 +229,9 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
      * @return mixed hash code.
      */
     private int mix(final int h) {
-        return h ^ (h >>> 16);
+        int hash = h;
+        hash ^= (hash >>> 20) ^ (hash >>> 12);
+        return hash ^ (hash >>> 7) ^ (hash >>> 4);
     }
 
     /**
@@ -239,8 +257,16 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
      * @return index within the segment.
      */
     private int probeIndex(final Segment<K, V> seg, final int segIdx, final int probeCount, final K key) {
-        final int h = key.hashCode(); // Precompute hash code
-        return probeFunction(segIdx, probeCount, h) % seg.capacity;
+        final int h = key.hashCode();
+        final int probeFn = probeFunction(segIdx, probeCount, h);
+
+        // Fast path for power-of-two capacities
+        if ((seg.capacity & (seg.capacity - 1)) == 0) {
+            return probeFn & (seg.capacity - 1);
+        }
+
+        // Fall back to modulo for non-power-of-two
+        return probeFn % seg.capacity;
     }
 
     /**
@@ -251,12 +277,18 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
      * @return maximum number of probe attempts.
      */
     private int probeLimit(final double freeFraction) {
-        if (freeFraction <= 0) {
-            return Integer.MAX_VALUE;
+        // Avoid the expensive log calculation for nearly full segments
+        if (freeFraction <= 0.01) {
+            return 32; // Reasonable upper bound
         }
+
+        // Use a lookup table for common free fractions
+        if (freeFraction >= 0.5) return 2;
+        if (freeFraction >= 0.25) return 4;
+        if (freeFraction >= 0.125) return 8;
+
         final double logFree = Math.log(1.0 / freeFraction) / LOG_OF_2;
-        final double logDelta = Math.log(1.0 / delta) / LOG_OF_2;
-        return (int) Math.ceil(PROBE_MULTIPLIER * Math.min(logFree, logDelta));
+        return (int) (PROBE_MULTIPLIER * Math.min(logFree, logDeltaInverse));
     }
 
     // ---------------------- Insertion Methods ----------------------
@@ -506,14 +538,21 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
 
     /**
      * Resizes the table by doubling its capacity and rehashing all entries.
-     * Aggressive optimizations are applied:
-     * - All constants and capacities are cached in final local variables.
-     * - Fast-path rehashing via fastRehashInsert is used.
      *
      * @throws IllegalStateException if rehashing fails.
      */
     private void resize() {
         final int newCapacity = totalCapacity * 2;
+        resize(newCapacity);
+    }
+
+    /**
+     * Resizes the table by doubling its capacity and rehashing all entries.
+     *
+     * @param newCapacity the new capacity.
+     * @throws IllegalStateException if rehashing fails.
+     */
+    private void resize(final int newCapacity) {
         final Segment<K, V>[] newSegments = createSegments(newCapacity);
         final Segment<K, V>[] oldSegments = segments;
         totalCapacity = newCapacity;
@@ -549,22 +588,82 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
      * @return associated value or null.
      */
     @Override
-    @SuppressWarnings("unchecked")
     public V get(final Object key) {
         if (key == null) {
             throw new NullPointerException("Key cannot be null");
         }
+
+        // Compute hash code once
+        final int hashCode = key.hashCode();
+
+        // Fast path: check only first few slots in segment 0
+        final Segment<K, V> firstSegment = segments[0];
+        final int firstSegCap = firstSegment.capacity;
+        final Entry<K, V>[] firstTable = firstSegment.table;
+        final boolean isPowerOfTwo = (firstSegCap & (firstSegCap - 1)) == 0;
+        final int mask = firstSegCap - 1;
+
+        // Direct lookup using first probe (most common case)
+        int idx = mix(hashCode) & 0x7fffffff;
+        if (isPowerOfTwo) {
+            idx &= mask;
+        } else {
+            idx %= firstSegCap;
+        }
+
+        Entry<K, V> e = firstTable[idx];
+        if (e != null && e.hash == hashCode && key.equals(e.key)) {
+            return e.value;
+        }
+
+        // Try a few more probes in first segment with unrolled loop
+        for (int probeCount = 2; probeCount <= 4; probeCount++) {
+            idx = (mix(hashCode) + probeCount * probeCount) & 0x7fffffff;
+            if (isPowerOfTwo) {
+                idx &= mask;
+            } else {
+                idx %= firstSegCap;
+            }
+
+            e = firstTable[idx];
+            if (e == null) break;  // Early termination
+            if (e.hash == hashCode && key.equals(e.key)) {
+                return e.value;
+            }
+        }
+
+        // If not found in the hot path, search remaining segments
+        return searchRemainingSegments(key, hashCode);
+    }
+
+    /**
+     * Searches for the key in remaining segments.
+     * Separate method to keep hot path clean for JIT optimization.
+     *
+     * @param key      the key.
+     * @param hashCode the precomputed hash code.
+     * @return associated value or null.
+     */
+    private V searchRemainingSegments(Object key, int hashCode) {
         final int maxSeg = Math.min(segments.length, currentBatch + 2);
-        for (int segIdx = 0; segIdx < maxSeg; segIdx++) {
+
+        // Skip segment 0 since we already checked it
+        for (int segIdx = 1; segIdx < maxSeg; segIdx++) {
             final Segment<K, V> seg = segments[segIdx];
-            final int cap = seg.capacity;
-            for (int j = 1; j <= cap; j++) {
-                final int idx = probeIndex(seg, segIdx, j, (K) key);
-                final Entry<K, V> e = seg.table[idx];
-                if (e == null) {
-                    break;
-                }
-                if (e.key.equals(key)) {
+            final Entry<K, V>[] table = seg.table;
+            final int capacity = seg.capacity;
+            final boolean isPowerOfTwo = (capacity & (capacity - 1)) == 0;
+            final int mask = capacity - 1;
+
+            // Only check first 8 probes in each segment (diminishing returns after that)
+            for (int probeCount = 1; probeCount <= 8; probeCount++) {
+                final int mixedHash = mix(hashCode);
+                final int probeFn = (mixedHash + segIdx * probeCount * probeCount) & 0x7fffffff;
+                final int idx = isPowerOfTwo ? (probeFn & mask) : (probeFn % capacity);
+
+                final Entry<K, V> e = table[idx];
+                if (e == null) break; // Early termination
+                if (e.hash == hashCode && key.equals(e.key)) {
                     return e.value;
                 }
             }
@@ -641,8 +740,18 @@ public class ElasticHashMap<K, V> implements Map<K, V>, Serializable {
      */
     @Override
     public void putAll(final Map<? extends K, ? extends V> m) {
+        ensureCapacity(size + m.size());
         for (final Map.Entry<? extends K, ? extends V> e : m.entrySet()) {
             put(e.getKey(), e.getValue());
+        }
+    }
+
+    private void ensureCapacity(int minCapacity) {
+        if (minCapacity > threshold) {
+            int newCapacity = Math.max(totalCapacity * 2,
+                    (minCapacity * 4) / 3);
+            // Perform a single resize operation
+            resize(newCapacity);
         }
     }
 
