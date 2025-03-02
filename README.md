@@ -17,6 +17,9 @@ The implementation achieves these bounds by dividing the hash table into segment
 and inserting entries in batches. Batch 0 fills the first segment (A1) up to about 75% capacity, while subsequent
 batches use two segments and employ a mix of limited and linear probing based on the free fraction of the segments.
 
+This implementation does not claim to be a fully optimized version, but if you have any ideas on how to make it more
+optimal, I invite you to make pull requests.
+
 ---
 
 ## Features
@@ -94,8 +97,12 @@ To use the `ElasticHashMap`, simply include the class in your project and create
 ```java
 import comiam.ElasticHashMap;
 
+
 ElasticHashMap<String, Integer> map = new ElasticHashMap<>(1024, 0.125);
-map.put("apple", 1);
+map.
+
+put("apple",1);
+
 Integer value = map.get("apple");
 ```
 
