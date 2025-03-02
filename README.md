@@ -1,5 +1,7 @@
 # ElasticHashMap
 
+![Build Status](https://github.com/comiam/elastic-hash-map/actions/workflows/maven.yml/badge.svg)
+
 **ElasticHashMap** is a Java implementation of the elastic hashing algorithm as described in the paper:
 
 **"Optimal Bounds for Open Addressing Without Reordering"**  
